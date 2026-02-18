@@ -455,7 +455,7 @@ class Root {
   public scanContent(content: string, extension: string): boolean {
     if (!this.scanner) return false
 
-    let newCandidates = this.scanner.scan_files([{ content, extension }])
+    let newCandidates = this.scanner.scanFiles([{ content, extension }])
     for (let candidate of newCandidates) {
       this.candidates.add(candidate)
     }
