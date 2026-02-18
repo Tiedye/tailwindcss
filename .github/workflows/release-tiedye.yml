@@ -140,12 +140,8 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
-          path: ${{ env.OXIDE_LOCATION }}
-
-      - name: Move artifacts
-        run: |
-          cd ${{ env.OXIDE_LOCATION }}
-          cp bindings-x86_64-unknown-linux-gnu/* ./npm/linux-x64-gnu/
+          name: bindings-x86_64-unknown-linux-gnu
+          path: ${{ env.OXIDE_LOCATION }}/npm/linux-x64-gnu/
 
       - name: Build Tailwind CSS
         run: pnpm run build
