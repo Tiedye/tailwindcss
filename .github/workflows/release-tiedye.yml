@@ -1,0 +1,181 @@
+name: Release Tiedye
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: tailwindcss-oxide
+  NODE_VERSION: 24
+  OXIDE_LOCATION: ./crates/node
+
+jobs:
+  build:
+    name: Build x86_64-unknown-linux-gnu (oxide)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      # Cargo already skips downloading dependencies if they already exist
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-x86_64-unknown-linux-gnu-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # Cache the `oxide` Rust build
+      - name: Cache oxide build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ./crates/node/*.node
+            ./crates/node/*.wasm
+            ./crates/node/index.d.ts
+            ./crates/node/index.js
+            ./crates/node/browser.js
+            ./crates/node/tailwindcss-oxide.wasi-browser.js
+            ./crates/node/tailwindcss-oxide.wasi.cjs
+            ./crates/node/wasi-worker-browser.mjs
+            ./crates/node/wasi-worker.mjs
+          key: ${{ runner.os }}-x86_64-unknown-linux-gnu-oxide-${{ hashFiles('./crates/**/*') }}
+
+      - name: Setup rust target
+        run: rustup target add x86_64-unknown-linux-gnu
+
+      - name: Install dependencies
+        run: pnpm install --ignore-scripts --filter=!./playgrounds/*
+
+      - name: Build release
+        run: pnpm run --filter ${{ env.OXIDE_LOCATION }} build:platform --target=x86_64-unknown-linux-gnu
+        env:
+          RUST_TARGET: x86_64-unknown-linux-gnu
+
+      - name: Strip debug symbols # https://github.com/rust-lang/rust/issues/46034
+        run: strip ${{ env.OXIDE_LOCATION }}/*.node
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: bindings-x86_64-unknown-linux-gnu
+          path: ${{ env.OXIDE_LOCATION }}/*.node
+
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    name: Build and release @tiedye/tailwindcss-vite
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    needs:
+      - build
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 20
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+          registry-url: 'https://npm.pkg.github.com'
+
+      # Cargo already skips downloading dependencies if they already exist
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-x86_64-unknown-linux-gnu-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # Cache the `oxide` Rust build
+      - name: Cache oxide build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ./crates/node/*.node
+            ./crates/node/*.wasm
+            ./crates/node/index.d.ts
+            ./crates/node/index.js
+            ./crates/node/browser.js
+            ./crates/node/tailwindcss-oxide.wasi-browser.js
+            ./crates/node/tailwindcss-oxide.wasi.cjs
+            ./crates/node/wasi-worker-browser.mjs
+            ./crates/node/wasi-worker.mjs
+          key: ${{ runner.os }}-x86_64-unknown-linux-gnu-oxide-${{ hashFiles('./crates/**/*') }}
+
+      - name: Setup WASM target
+        run: rustup target add wasm32-wasip1-threads
+
+      - name: Install dependencies
+        run: pnpm --filter=!./playgrounds/* install
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: ${{ env.OXIDE_LOCATION }}
+
+      - name: Move artifacts
+        run: |
+          cd ${{ env.OXIDE_LOCATION }}
+          cp bindings-x86_64-unknown-linux-gnu/* ./npm/linux-x64-gnu/
+
+      - name: Build Tailwind CSS
+        run: pnpm run build
+        env:
+          FEATURES_ENV: stable
+
+      - name: Run pre-publish optimizations scripts
+        run: node ./scripts/pre-publish-optimizations.mjs
+
+      - name: Lock pre-release versions
+        run: node ./scripts/lock-pre-release-versions.mjs
+
+      - name: Rename package for Tiedye scope
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = 'packages/@tailwindcss-vite/package.json';
+            const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+            pkg.name = '@tiedye/tailwindcss-vite';
+            delete pkg.publishConfig.provenance;
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Calculate environment variables
+        run: |
+          echo "RELEASE_CHANNEL=$(node ./scripts/release-channel.js)" >> $GITHUB_ENV
+
+      - name: Publish @tiedye/tailwindcss-vite to GitHub Packages
+        run: |
+          cd packages/@tailwindcss-vite
+          pnpm publish --tag ${{ env.RELEASE_CHANNEL }} --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
