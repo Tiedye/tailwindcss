@@ -26,6 +26,14 @@ const SPECIAL_QUERY_RE = /[?&](?:worker|sharedworker|raw|url)\b/
 const COMMON_JS_PROXY_RE = /\?commonjs-proxy/
 const INLINE_STYLE_ID_RE = /[?&]index\=\d+\.css$/
 
+const IGNORED_EXTENSIONS = new Set([
+  'css', 'less', 'sass', 'scss', 'styl',
+  'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'avif',
+  'woff', 'woff2', 'ttf', 'eot', 'otf',
+  'mp3', 'mp4', 'webm', 'ogg', 'wav',
+  'json', 'map', 'lock',
+])
+
 export type PluginOptions = {
   /**
    * Optimize and minify the output CSS.
@@ -120,6 +128,48 @@ export default function tailwindcss(opts: PluginOptions = {}): Plugin[] {
     )
   }
 
+  let updateTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+  function scheduleUpdate(envName: string) {
+    // Debounce: multiple modules may transform in quick succession
+    if (updateTimers.has(envName)) return
+    updateTimers.set(
+      envName,
+      setTimeout(() => {
+        updateTimers.delete(envName)
+        triggerCssUpdate(envName)
+      }, 16),
+    )
+  }
+
+  function triggerCssUpdate(envName: string) {
+    let roots = rootsByEnv.get(envName)
+
+    for (let server of servers) {
+      for (let [id] of roots) {
+        let moduleGraph =
+          server.environments?.[envName]?.moduleGraph ?? server.moduleGraph
+        let mod = moduleGraph.getModuleById(id)
+        if (!mod) continue
+
+        moduleGraph.invalidateModule(mod)
+
+        let hot = server.environments?.[envName]?.hot ?? server.hot ?? server.ws
+        hot.send({
+          type: 'update',
+          updates: [
+            {
+              type: 'js-update',
+              timestamp: Date.now(),
+              path: mod.url,
+              acceptedPath: mod.url,
+            },
+          ],
+        })
+      }
+    }
+  }
+
   return [
     {
       // Step 1: Scan source files for candidates
@@ -147,6 +197,40 @@ export default function tailwindcss(opts: PluginOptions = {}): Plugin[] {
         // But again, the user can override that choice explicitly
         if (typeof opts.optimize === 'object') {
           minify = opts.optimize.minify !== false
+        }
+      },
+    },
+
+    {
+      name: '@tailwindcss/vite:scan-content',
+      enforce: 'pre',
+
+      transform(src, id) {
+        let extension = getExtension(id)
+        if (extension === 'css') return
+        if (id.includes('/.vite/')) return
+        if (id.includes('/node_modules/')) return
+        if (SPECIAL_QUERY_RE.test(id)) return
+        if (COMMON_JS_PROXY_RE.test(id)) return
+
+        if (id.startsWith('\0')) {
+          extension = getExtension(id.slice(1))
+        }
+
+        if (!extension || IGNORED_EXTENSIONS.has(extension)) return
+
+        let envName = this.environment?.name ?? 'default'
+        let roots = rootsByEnv.get(envName)
+        let hasNewCandidates = false
+
+        for (let root of roots.values()) {
+          if (root.scanContent(src, extension)) {
+            hasNewCandidates = true
+          }
+        }
+
+        if (hasNewCandidates) {
+          scheduleUpdate(envName)
         }
       },
     },
@@ -366,6 +450,16 @@ class Root {
 
   get scannedFiles() {
     return this.scanner?.files ?? []
+  }
+
+  public scanContent(content: string, extension: string): boolean {
+    if (!this.scanner) return false
+
+    let newCandidates = this.scanner.scan_files([{ content, extension }])
+    for (let candidate of newCandidates) {
+      this.candidates.add(candidate)
+    }
+    return newCandidates.length > 0
   }
 
   // Generate the CSS for the root file. This can return false if the file is
