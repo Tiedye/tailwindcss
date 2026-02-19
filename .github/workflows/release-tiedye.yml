@@ -82,9 +82,7 @@ jobs:
     name: Build and release @tiedye/tailwindcss-vite
 
     permissions:
-      contents: read
-      packages: write
-      id-token: write
+      contents: write
 
     needs:
       - build
@@ -101,7 +99,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'pnpm'
-          registry-url: 'https://npm.pkg.github.com'
 
       # Cargo already skips downloading dependencies if they already exist
       - name: Cache cargo
@@ -154,24 +151,19 @@ jobs:
       - name: Lock pre-release versions
         run: node ./scripts/lock-pre-release-versions.mjs
 
-      - name: Rename package for Tiedye scope
+      - name: Calculate version
         run: |
-          node -e "
-            const fs = require('fs');
-            const path = 'packages/@tailwindcss-vite/package.json';
-            const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
-            pkg.name = '@tiedye/tailwindcss-vite';
-            delete pkg.publishConfig.provenance;
-            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
-          "
+          echo "TAILWINDCSS_VERSION=$(node -e 'console.log(require(`./packages/tailwindcss/package.json`).version);')" >> $GITHUB_ENV
 
-      - name: Calculate environment variables
-        run: |
-          echo "RELEASE_CHANNEL=$(node ./scripts/release-channel.js)" >> $GITHUB_ENV
-
-      - name: Publish @tiedye/tailwindcss-vite to GitHub Packages
+      - name: Pack @tailwindcss/vite tarball
         run: |
           cd packages/@tailwindcss-vite
-          pnpm publish --tag ${{ env.RELEASE_CHANNEL }} --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          pnpm pack --pack-gzip-level 9
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: vite-v${{ env.TAILWINDCSS_VERSION }}
+          name: "@tailwindcss/vite v${{ env.TAILWINDCSS_VERSION }}"
+          files: packages/@tailwindcss-vite/*.tgz
+          fail_on_unmatched_files: true
